@@ -17,6 +17,8 @@ ROOT = Path(__file__).resolve().parent.parent
 
 class PortraitPipeline:
     def __init__(self, crop_scale: float, face_idx: int):
+        import torch
+        use_cpu = not torch.cuda.is_available()
         runtime = ROOT / "checkpoints" / "runtime"
         inference = InferenceConfig(
             models_config=str(ROOT / "portrait" / "config" / "models.yaml"),
@@ -26,6 +28,8 @@ class PortraitPipeline:
             checkpoint_W=str(runtime / "models" / "warp_network.pth"),
             checkpoint_S=str(runtime / "models" / "stitch_network.pth"),
             mask_crop_path=str(ROOT / "portrait" / "utils" / "resources" / "mask_template.png"),
+            flag_force_cpu=use_cpu,
+            flag_use_half_precision=not use_cpu,
         )
         inference.mask_crop = cv2.imread(inference.mask_crop_path, cv2.IMREAD_COLOR)
         crop = CropConfig(
@@ -33,10 +37,12 @@ class PortraitPipeline:
             landmark106_ckpt_path=str(runtime / "aux_models" / "2d106det.onnx"),
             landmark_ckpt_path=str(runtime / "aux_models" / "landmark203.onnx"),
             scale=float(crop_scale),
+            flag_force_cpu=use_cpu,
         )
         self.face_idx = int(face_idx)
         self.live_portrait_wrapper = LivePortraitWrapper(inference_cfg=inference)
-        self.cropper = Cropper(crop_cfg=crop)
+        self.cropper = Cropper(crop_cfg=crop, flag_force_cpu=use_cpu)
+
 
     def make_motion_template(self, images, eye_ratios, lip_ratios, output_fps=25):
         motions = []

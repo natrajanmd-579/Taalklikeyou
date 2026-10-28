@@ -11,8 +11,7 @@ class LMDM(nn.Module):
         motion_feat_dim=265,
         audio_feat_dim=1024+35,
         seq_frames=80,
-        checkpoint='',
-        device='cuda',
+        device='cpu' if not torch.cuda.is_available() else 'cuda',
         clip_denoised=False,    # clip denoised (-1,1)
         multi_cond_frame=False,
     ):
@@ -21,7 +20,7 @@ class LMDM(nn.Module):
         self.motion_feat_dim = motion_feat_dim
         self.audio_feat_dim = audio_feat_dim
         self.seq_frames = seq_frames
-        self.device = device
+        self.device = str(device)
 
         self.n_timestep = 1000
         self.clip_denoised = clip_denoised
@@ -80,6 +79,13 @@ class LMDM(nn.Module):
         pred_noise, x_start = self.model_predictions(x, cond_frame, cond, time_cond)
         return pred_noise, x_start
     
+    def to(self, *args, **kwargs):
+        if len(args) > 0:
+            self.device = str(args[0])
+        elif "device" in kwargs:
+            self.device = str(kwargs["device"])
+        return super().to(*args, **kwargs)
+
     def load_model(self, ckpt_path):
         checkpoint = torch.load(ckpt_path, map_location='cpu')
         self.model.load_state_dict(checkpoint["model_state_dict"])

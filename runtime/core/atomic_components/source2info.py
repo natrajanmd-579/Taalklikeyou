@@ -40,6 +40,10 @@ class Source2Info:
             det, _ = self.insightface_det(img)
             boxes = det[np.argsort(-(det[:, 2] - det[:, 0]) * (det[:, 3] - det[:, 1]))]
             if len(boxes) == 0:
+                # Try with a lower threshold before giving up
+                det, _ = self.insightface_det(img, det_thresh=0.1)
+                boxes = det[np.argsort(-(det[:, 2] - det[:, 0]) * (det[:, 3] - det[:, 1]))]
+            if len(boxes) == 0:
                 return None
             lmk_for_track = self.landmark106(img, boxes[0])  # 106
         else:  # track for video frames
@@ -105,7 +109,10 @@ class Source2Info:
             crop_vy_ratio: -0.125
             crop_flag_do_rot: True
         """
-        img_crop, M_c2o, lmk203 = self._crop(img, last_lmk=last_lmk, **kwargs)
+        crop_res = self._crop(img, last_lmk=last_lmk, **kwargs)
+        if crop_res is None:
+            raise RuntimeError("No face detected in the image/video. Please use a clearer, front-facing face image.")
+        img_crop, M_c2o, lmk203 = crop_res
 
         eye_open, eye_ball = self._get_eye_info(img_crop)
 

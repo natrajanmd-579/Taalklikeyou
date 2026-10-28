@@ -25,8 +25,9 @@ class MotionExtractor:
         image: np.ndarray, shape (1, 3, 256, 256), RGB, 0-1
         """
         outputs = {}
+        is_cuda = self.device != "cpu" and not str(self.device).startswith("cpu")
         with torch.no_grad(), torch.autocast(
-            device_type=self.device[:4], dtype=torch.float16, enabled=True
+            device_type=str(self.device)[:4], dtype=torch.float16, enabled=is_cuda
         ):
             pred = self.model(torch.from_numpy(image).to(self.device))
             for i, name in enumerate(self.output_names):

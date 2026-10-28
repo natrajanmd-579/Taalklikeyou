@@ -28,6 +28,15 @@ def parse_cfg(cfg_pkl, data_root, replace_cfg=None):
     audio2motion_cfg = cfg["audio2motion_cfg"]
     default_kwargs = cfg["default_kwargs"]
 
+    import torch
+    if not torch.cuda.is_available():
+        for k in base_cfg:
+            if isinstance(base_cfg[k], dict) and base_cfg[k].get("device") == "cuda":
+                base_cfg[k]["device"] = "cpu"
+        if audio2motion_cfg.get("device") == "cuda":
+            audio2motion_cfg["device"] = "cpu"
+
+
     for k in base_cfg:
         if k == "landmark478_cfg":
             for kk in ["task_path", "blaze_face_model_path", "face_mesh_model_path"]:

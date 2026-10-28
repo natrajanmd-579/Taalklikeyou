@@ -21,8 +21,9 @@ class WarpNetwork:
         if feature_id != self._cached_feature_id:
             self._cached_feature = torch.from_numpy(feature_3d).to(self.device)
             self._cached_feature_id = feature_id
+        is_cuda = self.device != "cpu" and not str(self.device).startswith("cpu")
         with torch.inference_mode(), torch.autocast(
-            device_type=self.device[:4], dtype=torch.float16, enabled=True
+            device_type=str(self.device)[:4], dtype=torch.float16, enabled=is_cuda
         ):
             pred = self.model(
                 self._cached_feature,

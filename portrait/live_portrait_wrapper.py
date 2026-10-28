@@ -29,7 +29,7 @@ class LivePortraitWrapper(object):
         self.inference_cfg = inference_cfg
         self.device_id = inference_cfg.device_id
         self.compile = inference_cfg.flag_do_torch_compile
-        if inference_cfg.flag_force_cpu:
+        if inference_cfg.flag_force_cpu or not torch.cuda.is_available():
             self.device = 'cpu'
         else:
             try:
@@ -39,6 +39,7 @@ class LivePortraitWrapper(object):
                     self.device = 'cuda:' + str(self.device_id)
             except Exception:
                 self.device = 'cuda:' + str(self.device_id)
+
 
         model_config = yaml.load(open(inference_cfg.models_config, 'r'), Loader=yaml.SafeLoader)
         # init F
@@ -68,12 +69,13 @@ class LivePortraitWrapper(object):
         self.timer = Timer()
 
     def inference_ctx(self):
-        if self.device == "mps":
+        if self.device in ("mps", "cpu"):
             ctx = contextlib.nullcontext()
         else:
             ctx = torch.autocast(device_type=self.device[:4], dtype=torch.float16,
                                  enabled=self.inference_cfg.flag_use_half_precision)
         return ctx
+
 
     def update_config(self, user_args):
         for k, v in user_args.items():

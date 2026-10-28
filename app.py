@@ -21,6 +21,7 @@ from contextlib import asynccontextmanager
 import cv2
 import numpy as np
 import librosa
+import torch
 from fastapi import (
     FastAPI,
     File,
@@ -62,17 +63,25 @@ LIP_PERSON_ID = int(os.environ.get("LIP_PERSON_ID", "192"))
 POSE_PERSON_ID = int(os.environ.get("POSE_PERSON_ID", "274"))
 LIP_GUIDANCE_WEIGHT = os.environ.get("LIP_GUIDANCE_WEIGHT", "1.3")
 POSE_GUIDANCE_WEIGHT = os.environ.get("POSE_GUIDANCE_WEIGHT", "1.5")
+HAS_CUDA = torch.cuda.is_available()
+if not HAS_CUDA:
+    # Restrict CPU threads to avoid OpenMP barrier latency on hybrid Intel architectures
+    torch.set_num_threads(int(os.environ.get("TORCH_NUM_THREADS", "4")))
+
+DEFAULT_DITTO_POSE = "1" if HAS_CUDA else "0"
+DEFAULT_RENDER_FPS = "25" if HAS_CUDA else "10"
+
 STREAM_FRAMES = int(os.environ.get("STREAM_FRAMES", "50"))
 AUDIO_CHUNK_SECONDS = float(os.environ.get("AUDIO_CHUNK_SECONDS", "1.0"))
 MOTION_FPS = 25.0
 STREAM_RENDER_FPS = max(
     1.0,
-    min(50.0, float(os.environ.get("STREAM_RENDER_FPS", "25"))),
+    min(50.0, float(os.environ.get("STREAM_RENDER_FPS", DEFAULT_RENDER_FPS))),
 )
 SAMPLING_STEPS = int(os.environ.get("SAMPLING_STEPS", "1"))
 STAGE0 = os.environ.get("STAGE0", "1").lower() in ("1", "true", "yes")
 NEUTRAL = os.environ.get("NEUTRAL", "1").lower() in ("1", "true", "yes")
-DITTO_POSE = os.environ.get("DITTO_POSE", "1").lower() in ("1", "true", "yes")
+DITTO_POSE = os.environ.get("DITTO_POSE", DEFAULT_DITTO_POSE).lower() in ("1", "true", "yes")
 CONTINUOUS_IDLE = os.environ.get("CONTINUOUS_IDLE", "0").lower() in (
     "1",
     "true",
@@ -86,6 +95,83 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(AVATAR_BUNDLE_DIR, exist_ok=True)
 
 MAX_INPUT_IMAGE_SIZE = 1024
+
+
+def ensure_ffmpeg() -> str | None:
+    """Ensure ffmpeg executable is available and present in PATH."""
+    exe = shutil.which("ffmpeg")
+    if exe:
+        return exe
+    try:
+        import imageio_ffmpeg
+
+        raw_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        bin_dir = os.path.dirname(raw_exe)
+        standard_exe = os.path.join(
+            bin_dir, "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
+        )
+        if not os.path.exists(standard_exe):
+            try:
+                shutil.copyfile(raw_exe, standard_exe)
+            except Exception:
+                pass
+        target_exe = standard_exe if os.path.exists(standard_exe) else raw_exe
+        current_path = os.environ.get("PATH", "")
+        if bin_dir not in current_path:
+            os.environ["PATH"] = bin_dir + os.pathsep + current_path
+        return target_exe
+    except Exception:
+        return shutil.which("ffmpeg")
+
+
+# Auto-configure ffmpeg on startup
+ensure_ffmpeg()
+
+
+def load_audio_file(audio_path: str, sr: int = 16000) -> np.ndarray:
+    """Load an audio file reliably into a 1D float32 array at the target sample rate.
+
+    Supports WAV, MP3, M4A, AAC, OGG, FLAC, WEBM, etc. by falling back to FFmpeg if
+    soundfile cannot parse the audio container.
+    """
+    try:
+        import soundfile as sf
+
+        with sf.SoundFile(audio_path):
+            raw_audio, native_sr = sf.read(audio_path, dtype="float32")
+            if raw_audio.ndim > 1:
+                raw_audio = np.mean(raw_audio, axis=1)
+            if native_sr != sr:
+                return librosa.resample(raw_audio, orig_sr=native_sr, target_sr=sr)
+            return raw_audio
+    except Exception:
+        pass
+
+    ffmpeg_bin = ensure_ffmpeg()
+    if ffmpeg_bin:
+        cmd = [
+            ffmpeg_bin,
+            "-nostdin",
+            "-threads",
+            "0",
+            "-i",
+            audio_path,
+            "-f",
+            "s16le",
+            "-ac",
+            "1",
+            "-ar",
+            str(sr),
+            "-",
+        ]
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        out, err = p.communicate()
+        if p.returncode == 0 and len(out) > 0:
+            return np.frombuffer(out, dtype=np.int16).astype(np.float32) / 32768.0
+
+    audio, _ = librosa.load(audio_path, sr=sr)
+    return audio
+
 
 def build_runtime_models():
     print("[models] Loading SDK (TensorRT engines + models)...")
@@ -247,6 +333,9 @@ def api_status():
             getattr(app.state, "shutdown_requested", False)
         ),
         "conversation": conversation.public_status() if conversation else {},
+        "has_cuda": HAS_CUDA,
+        "default_render_fps": STREAM_RENDER_FPS,
+        "default_ditto_pose": DITTO_POSE,
     }
 
 
@@ -363,7 +452,7 @@ def _strip_conflicting_landscape_rotation(path: str) -> bool:
     quarter_turn = abs(round(rotation)) % 180 == 90
     if width <= height or not quarter_turn:
         return False
-    ffmpeg = shutil.which("ffmpeg")
+    ffmpeg = ensure_ffmpeg() or shutil.which("ffmpeg")
     if not ffmpeg:
         return False
     suffix = os.path.splitext(path)[1] or ".mp4"
@@ -1515,7 +1604,7 @@ async def ws_endpoint(ws: WebSocket):
         speed_reporter_task = asyncio.create_task(report_stream_speed())
 
         if audio_path:
-            audio, _ = librosa.load(audio_path, sr=16000)
+            audio = load_audio_file(audio_path, sr=16000)
             audio_url = f"/uploads/{os.path.basename(audio_path)}"
         else:
             audio = np.zeros(0, dtype=np.float32)

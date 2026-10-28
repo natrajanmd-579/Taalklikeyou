@@ -394,6 +394,19 @@
     background:transparent; border-color:rgba(255,255,255,0.1); color:var(--text-dim);
   }
   .btn-ghost:hover { border-color:var(--text-dim); color:var(--text); }
+  .btn-success {
+    background:var(--success); color:#06080f; border-color:var(--success);
+  }
+  .btn-success:hover:not(:disabled) {
+    filter:brightness(1.1); box-shadow:0 4px 20px rgba(94,234,180,0.3);
+  }
+  .toggle-replay-loop {
+    display:flex; align-items:center; gap:6px; font-size:11px; color:var(--text-dim); cursor:pointer;
+    user-select:none; padding:4px 6px; border-radius:6px; background:rgba(255,255,255,0.04);
+  }
+  .toggle-replay-loop input {
+    accent-color:var(--success); cursor:pointer; width:14px; height:14px;
+  }
   .status-text {
     flex:1; font-size:10px; color:var(--text-dim);
     white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
@@ -541,7 +554,7 @@
         <label class="setting" id="poseGuidanceSetting"><span>Pose guidance</span><input id="poseGuidance" type="number" min="0" step="0.1" value="1.5"></label>
         <label class="setting"><span>Sampling steps</span><input id="samplingSteps" type="number" min="1" value="1"></label>
         <label class="setting"><span>Motion chunk (frames)</span><input id="streamFrames" type="number" min="1" value="50"></label>
-        <label class="setting"><span>Preview FPS</span><input id="previewFps" type="number" min="1" max="50" step="1" value="25"></label>
+        <label class="setting"><span>Preview FPS</span><input id="previewFps" type="number" min="1" max="50" step="1" value="10"></label>
         <label class="setting"><span>Max image size (long edge)</span><input id="maxImageSize" type="number" min="64" max="4096" step="64" value="1024"></label>
         <label class="setting"><span>Face index</span><input id="faceIdx" type="number" min="0" step="1" value="0" title="Detected faces are indexed from left to right"></label>
         <label class="setting"><span>Crop scale</span><input id="cropScale" type="number" min="0.1" step="0.1" value="2.3" title="Larger values include a wider area around the face"></label>
@@ -551,7 +564,7 @@
           <label><input id="stage0" type="checkbox" checked> Stage0</label>
           <label><input id="neutral" type="checkbox" checked> Neutral</label>
           <label id="perFrameNormalizeDeltaRow" hidden><input id="perFrameNormalizeDelta" type="checkbox"> Per-frame normalize ΔE</label>
-          <label id="dittoPoseRow"><input id="dittoPose" type="checkbox" checked> Ditto pose</label>
+          <label id="dittoPoseRow"><input id="dittoPose" type="checkbox"> Ditto pose</label>
           <label><input id="pasteBack" type="checkbox" checked> Paste back</label>
           <label><input id="continuousIdle" type="checkbox"> Continuous idle</label>
           <label id="microphonePlaybackRow" hidden><input id="microphonePlayback" type="checkbox" checked> Play microphone audio</label>
@@ -562,6 +575,11 @@
     <div class="controls">
       <button class="btn btn-primary" id="startBtn" disabled>Start Streaming</button>
       <button class="btn btn-ghost" id="stopBtn" disabled>Stop</button>
+      <button class="btn btn-success" id="replayBtn" style="display:none;" type="button">&#9654; Replay</button>
+      <label class="toggle-replay-loop" id="replayLoopLabel" style="display:none;">
+        <input type="checkbox" id="replayLoop" checked> Loop
+      </label>
+      <button class="btn btn-ghost" id="downloadVideoBtn" style="display:none;" type="button" title="Save / Download as video">&#128190; Save Video</button>
       <span class="status-text" id="statusText">Upload source &amp; audio to begin</span>
       <div class="system-actions">
         <button class="system-action" id="unloadModelsBtn" type="button">Release VRAM</button>
@@ -666,6 +684,10 @@ function loadState() {
       statusText.textContent = state.conversationConfigured
         ? 'Ready for conversation'
         : 'Conversation service is not configured';
+    } else if (s.has_cuda === false) {
+      if (!$('dittoPose').dataset.userModified) $('dittoPose').checked = false;
+      if (!$('previewFps').dataset.userModified) $('previewFps').value = String(s.default_render_fps || 10);
+      statusText.innerHTML = '<span style="color:#e67e22;font-weight:600;">[CPU Mode: Intel Iris Xe]</span> Ditto pose disabled & Preview FPS set to 10 for fast generation.';
     }
     updateStartButton();
     const prev = localStorage.getItem('talklikeyou_time');
@@ -832,6 +854,10 @@ const fpsBadge = $('fpsBadge');
 const sourceBadge = $('sourceBadge');
 const startBtn = $('startBtn');
 const stopBtn = $('stopBtn');
+const replayBtn = $('replayBtn');
+const replayLoop = $('replayLoop');
+const replayLoopLabel = $('replayLoopLabel');
+const downloadVideoBtn = $('downloadVideoBtn');
 const statusText = $('statusText');
 const audioModeBtn = $('audioModeBtn');
 const videoModeBtn = $('videoModeBtn');
@@ -1904,6 +1930,223 @@ function audioStreamIsReusable() {
   );
 }
 
+// --- Saved Session, Instant Replay & Video Export ---
+let savedSession = {
+  frames: new Map(),
+  audioUrl: null,
+  fps: 10,
+  totalFrames: 0,
+  sourceName: '',
+  ready: false,
+};
+let isReplaying = false;
+let replayRaf = null;
+
+function startReplay() {
+  if (!savedSession.ready || !savedSession.totalFrames) return;
+  stopReplay();
+  isReplaying = true;
+  replayBtn.textContent = '⏹ Stop Replay';
+  replayBtn.classList.replace('btn-success', 'btn-ghost');
+  startBtn.disabled = true;
+  stopBtn.disabled = false;
+  placeholder.style.display = 'none';
+  frameImg.style.display = 'block';
+  document.getElementById('display').classList.add('active');
+
+  const fps = savedSession.fps || 10;
+  const total = savedSession.totalFrames;
+
+  if (savedSession.audioUrl) {
+    audioPlayer.src = savedSession.audioUrl;
+    audioPlayer.currentTime = 0;
+    audioPlayer.play().catch(() => {});
+  }
+
+  const startTime = performance.now();
+  let lastShown = -1;
+
+  function step(now) {
+    if (!isReplaying) return;
+    let targetFrame;
+    if (savedSession.audioUrl && !audioPlayer.paused && !audioPlayer.ended) {
+      targetFrame = Math.floor(audioPlayer.currentTime * fps);
+    } else {
+      const elapsed = (now - startTime) / 1000;
+      targetFrame = Math.floor(elapsed * fps);
+    }
+
+    if (targetFrame < total) {
+      if (targetFrame !== lastShown) {
+        lastShown = targetFrame;
+        const blob = savedSession.frames.get(targetFrame);
+        if (blob) {
+          const url = URL.createObjectURL(blob);
+          const old = frameImg.src;
+          frameImg.src = url;
+          if (old?.startsWith('blob:')) URL.revokeObjectURL(old);
+        }
+      }
+      statusText.textContent = `Replaying · frame ${targetFrame + 1}/${total} (${fps} fps)`;
+      replayRaf = requestAnimationFrame(step);
+    } else {
+      if (replayLoop.checked) {
+        startReplay();
+      } else {
+        stopReplay();
+        statusText.textContent = `Replay finished (${total} frames)`;
+      }
+    }
+  }
+
+  replayRaf = requestAnimationFrame(step);
+}
+
+function stopReplay() {
+  isReplaying = false;
+  if (replayRaf) {
+    cancelAnimationFrame(replayRaf);
+    replayRaf = null;
+  }
+  audioPlayer.pause();
+  replayBtn.textContent = '▶ Replay';
+  replayBtn.classList.replace('btn-ghost', 'btn-success');
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
+}
+
+async function downloadSavedVideo() {
+  if (!savedSession.ready || !savedSession.totalFrames) return;
+  const downloadBtn = $('downloadVideoBtn');
+  downloadBtn.disabled = true;
+  const originalText = downloadBtn.innerHTML;
+  downloadBtn.textContent = '⏳ Preparing...';
+  statusText.textContent = 'Preparing video frames for export...';
+
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  const fps = savedSession.fps || 10;
+  const total = savedSession.totalFrames;
+
+  const firstBlob = savedSession.frames.get(0);
+  if (!firstBlob) {
+    downloadBtn.disabled = false;
+    downloadBtn.innerHTML = originalText;
+    return;
+  }
+
+  const loadedImages = [];
+  for (let i = 0; i < total; i++) {
+    const blob = savedSession.frames.get(i);
+    if (!blob) continue;
+    const img = new Image();
+    const url = URL.createObjectURL(blob);
+    await new Promise((res) => {
+      img.onload = () => res();
+      img.onerror = () => res();
+      img.src = url;
+    });
+    loadedImages.push({ img, url });
+  }
+
+  canvas.width = loadedImages[0].img.naturalWidth || 512;
+  canvas.height = loadedImages[0].img.naturalHeight || 512;
+
+  const videoStream = canvas.captureStream(fps);
+  let combinedStream = videoStream;
+  let audioContext = null;
+  let audioSource = null;
+
+  if (savedSession.audioUrl) {
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      audioContext = new AudioCtx();
+      const resp = await fetch(savedSession.audioUrl);
+      const ab = await resp.arrayBuffer();
+      const decodedBuffer = await audioContext.decodeAudioData(ab);
+      const destination = audioContext.createMediaStreamDestination();
+      audioSource = audioContext.createBufferSource();
+      audioSource.buffer = decodedBuffer;
+      audioSource.connect(destination);
+
+      const audioTracks = destination.stream.getAudioTracks();
+      if (audioTracks.length > 0) {
+        combinedStream = new MediaStream([
+          ...videoStream.getVideoTracks(),
+          ...audioTracks,
+        ]);
+      }
+    } catch (err) {
+      console.warn('Could not attach audio track to export:', err);
+    }
+  }
+
+  const supportedTypes = [
+    'video/webm;codecs=vp9,opus',
+    'video/webm;codecs=vp8,opus',
+    'video/webm',
+    'video/mp4',
+  ];
+  const mimeType = supportedTypes.find(t => MediaRecorder.isTypeSupported(t)) || '';
+
+  let recorder;
+  try {
+    recorder = new MediaRecorder(combinedStream, mimeType ? { mimeType } : {});
+  } catch (err) {
+    recorder = new MediaRecorder(combinedStream);
+  }
+
+  const chunks = [];
+  recorder.ondataavailable = (e) => {
+    if (e.data && e.data.size > 0) chunks.push(e.data);
+  };
+
+  recorder.onstop = () => {
+    const isMp4 = mimeType.includes('mp4');
+    const ext = isMp4 ? 'mp4' : 'webm';
+    const blob = new Blob(chunks, { type: mimeType || 'video/webm' });
+    const downloadUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = downloadUrl;
+    const safeName = (savedSession.sourceName || 'talking_avatar').replace(/[^a-zA-Z0-9_-]/g, '_');
+    a.download = `${safeName}_talklikeyou.${ext}`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(downloadUrl), 10000);
+
+    loadedImages.forEach(item => URL.revokeObjectURL(item.url));
+    if (audioContext && audioContext.state !== 'closed') audioContext.close();
+
+    downloadBtn.disabled = false;
+    downloadBtn.innerHTML = originalText;
+    statusText.textContent = `Video saved as ${safeName}_talklikeyou.${ext}!`;
+  };
+
+  recorder.start();
+  if (audioSource) audioSource.start(0);
+
+  const frameIntervalMs = 1000 / fps;
+  for (let i = 0; i < loadedImages.length; i++) {
+    ctx.drawImage(loadedImages[i].img, 0, 0, canvas.width, canvas.height);
+    statusText.textContent = `Exporting video: ${Math.round(((i + 1) / loadedImages.length) * 100)}%`;
+    await new Promise(r => setTimeout(r, frameIntervalMs));
+  }
+
+  setTimeout(() => {
+    if (recorder.state === 'recording') recorder.stop();
+  }, 200);
+}
+
+replayBtn.addEventListener('click', () => {
+  if (isReplaying) {
+    stopReplay();
+  } else {
+    startReplay();
+  }
+});
+downloadVideoBtn.addEventListener('click', downloadSavedVideo);
+
 function currentStreamCanBeReplaced() {
   const socketActive = state.ws && (
     state.ws.readyState === WebSocket.CONNECTING
@@ -2211,11 +2454,13 @@ function displayLoop() {
     const bufferedFrame = bufferedFrameAtOrBefore(target);
     if (bufferedFrame !== null) showBufferedFrame(bufferedFrame);
   }
-  const retainedHistoryFrames = Math.round(2.4 * streamTimelineFps);
-  if (showFrameIdx > retainedHistoryFrames) {
-    const oldestFrame = showFrameIdx - retainedHistoryFrames;
-    for (const frameIndex of frameBuffer.keys()) {
-      if (frameIndex < oldestFrame) frameBuffer.delete(frameIndex);
+  if (continuousIdle) {
+    const retainedHistoryFrames = Math.round(2.4 * streamTimelineFps);
+    if (showFrameIdx > retainedHistoryFrames) {
+      const oldestFrame = showFrameIdx - retainedHistoryFrames;
+      for (const frameIndex of frameBuffer.keys()) {
+        if (frameIndex < oldestFrame) frameBuffer.delete(frameIndex);
+      }
     }
   }
 
@@ -2353,6 +2598,19 @@ async function startFlowStream(options = {}) {
     cancelAnimationFrame(displayRaf);
     displayRaf = null;
   }
+  stopReplay();
+  savedSession = {
+    frames: new Map(),
+    audioUrl: state.audioUrl,
+    fps: requestedPreviewFps || 10,
+    totalFrames: 0,
+    sourceName: activeSrc?.name || 'avatar',
+    ready: false,
+  };
+  replayBtn.style.display = 'none';
+  replayLoopLabel.style.display = 'none';
+  downloadVideoBtn.style.display = 'none';
+
   const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`);
   ws.binaryType = 'arraybuffer';
   state.ws = ws; state.streaming = true; state.frameCount = 0; state.fpsTimer = performance.now();
@@ -2545,6 +2803,10 @@ async function startFlowStream(options = {}) {
     const idx = _pf >= 0 ? _pf : state.frameCount;
     if (!frameBuffer.has(idx)) receivedFrameCount += 1;
     frameBuffer.set(idx, blob);
+    savedSession.frames.set(idx, blob);
+    savedSession.totalFrames = Math.max(savedSession.totalFrames, idx + 1);
+    savedSession.fps = streamTimelineFps || streamRenderFps || 10;
+    savedSession.audioUrl = state.audioUrl;
     state.frameCount = Math.max(state.frameCount, idx + 1);
     _pf = -1;
     if (continuousIdle && (!streamHasAudio || audioPlayer.ended)) {
@@ -2875,6 +3137,11 @@ clearChatBtn.addEventListener('click', async () => {
 });
 
 stopBtn.addEventListener('click', () => {
+  if (isReplaying) {
+    stopReplay();
+    statusText.textContent = 'Replay stopped';
+    return;
+  }
   state.chatAbort?.abort();
   speechRecognition?.stop();
   if (mediaRecorder?.state === 'recording') mediaRecorder.stop();
@@ -2911,6 +3178,13 @@ function cleanup() {
   if (!streamDone) audioPlayer.pause();
   liveBadge.style.display = 'none'; startBtn.disabled = false; stopBtn.disabled = true;
   document.getElementById('display').classList.remove('active','streaming');
+
+  if (savedSession.frames.size > 0) {
+    savedSession.ready = true;
+    replayBtn.style.display = 'inline-block';
+    replayLoopLabel.style.display = 'inline-flex';
+    downloadVideoBtn.style.display = 'inline-block';
+  }
   updateStartButton(); updateFps();
 }
 function finalCleanup() {
@@ -2929,13 +3203,27 @@ function finalCleanup() {
   networkRebuffering = false;
   missingVideoFrameSince = null;
   liveBadge.style.display = 'none'; startBtn.disabled = false; stopBtn.disabled = true;
-  statusText.textContent = state.mode === 'conversation'
-    ? 'Ready for next message'
-    : (
-      state.mode === 'audio' && state.microphoneSelected
-        ? `Microphone stopped · ${state.frameCount} frames`
-        : `Playback complete · ${state.frameCount} frames`
-    );
+
+  if (savedSession.frames.size > 0) {
+    savedSession.ready = true;
+    replayBtn.style.display = 'inline-block';
+    replayLoopLabel.style.display = 'inline-flex';
+    downloadVideoBtn.style.display = 'inline-block';
+    statusText.textContent = `Complete · ${savedSession.totalFrames} frames saved. Replaying...`;
+    if (replayLoop.checked) {
+      setTimeout(() => startReplay(), 200);
+    } else {
+      statusText.textContent = `Complete · ${savedSession.totalFrames} frames saved. Click Replay or Save Video!`;
+    }
+  } else {
+    statusText.textContent = state.mode === 'conversation'
+      ? 'Ready for next message'
+      : (
+        state.mode === 'audio' && state.microphoneSelected
+          ? `Microphone stopped · ${state.frameCount} frames`
+          : `Playback complete · ${state.frameCount} frames`
+      );
+  }
   updateStartButton(); updateFps();
 }
 function updateFps() {
@@ -2973,7 +3261,13 @@ function updateMotionControlState() {
   $('poseGuidance').disabled = poseControlsDisabled;
 }
 
-$('dittoPose').addEventListener('change', updateMotionControlState);
+$('dittoPose').addEventListener('change', () => {
+  $('dittoPose').dataset.userModified = '1';
+  updateMotionControlState();
+});
+$('previewFps').addEventListener('input', () => {
+  $('previewFps').dataset.userModified = '1';
+});
 $('stage0').addEventListener('change', () => {
   updateMotionControlState();
   updateStartButton();

@@ -17,8 +17,9 @@ class Decoder:
             if torch.is_tensor(feature)
             else torch.from_numpy(feature).to(self.device)
         )
+        is_cuda = self.device != "cpu" and not str(self.device).startswith("cpu")
         with torch.inference_mode(), torch.autocast(
-            device_type=self.device[:4], dtype=torch.float16, enabled=True
+            device_type=str(self.device)[:4], dtype=torch.float16, enabled=is_cuda
         ):
             pred = self.model(tensor).float().cpu().numpy()
         

@@ -14,8 +14,9 @@ class AppearanceExtractor:
         """
         image: np.ndarray, shape (1, 3, 256, 256), float32, range [0, 1]
         """
+        is_cuda = self.device != "cpu" and not str(self.device).startswith("cpu")
         with torch.no_grad(), torch.autocast(
-            device_type=self.device[:4], dtype=torch.float16, enabled=True
+            device_type=str(self.device)[:4], dtype=torch.float16, enabled=is_cuda
         ):
             pred = self.model(torch.from_numpy(image).to(self.device)).float().cpu().numpy()
         return pred

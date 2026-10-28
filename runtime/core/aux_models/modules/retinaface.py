@@ -63,11 +63,11 @@ class RetinaFace:
 
         self.center_cache = {}
         self.nms_thresh = 0.4
-        self.det_thresh = 0.5
+        self.det_thresh = 0.2
         self._init_vars()
 
     def _init_vars(self):
-        self.input_size = (512, 512)
+        self.input_size = (640, 640)
         input_cfg = self.session.get_inputs()[0]
         input_name = input_cfg.name
         outputs = self.session.get_outputs()
